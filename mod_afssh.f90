@@ -8,17 +8,15 @@ real*8, parameter :: amu2kg=1.66053892d-27
 real*8, parameter :: au2kg=9.10938291d-31,au2J=4.35974417d-18,au2m=5.2917721092d-11,au2s=2.418884326505d-17
 real*8, parameter :: q_el=2.307075d-28
 complex*16,parameter :: iota = (0.d0,1.d0)
-real*8 pi,wave_to_J
+real*8 pi,wave_to_J,rate_k
 
 !! Potential
 integer nquant
-real*8 V_coup,V_exothermicity
-real*8 omg1,V_reorg1,g_coup1
-real*8 omg2,V_reorg2,g_coup2
-real*8 gamma_B,VER_rate
-real*8 temperature,beta
+real*8 g_coup,epsilon,g_coup_dash
+real*8 V_exothermicity,Vc,omg_B,gamma_B,temperature,omg_0
+real*8 beta,gamma_D,lambda_B,V_reorg,V_barrier,lambda_dash
 real*8 omg_c,omg_scaled
-real*8 s01,s02,x_cr,V_barrier
+real*8 s01,s02,x_cr
 real*8,allocatable :: mass(:),omg(:),ck(:)
 
 !! Input/Output
@@ -83,7 +81,7 @@ subroutine setup
   implicit none
   character st_ch
   integer i,size_seed,seed2(2)
-  real*8 rnd,c_0,c_e,kt,w
+  real*8 rnd,c_0,c_e,kt
 
   pi=dacos(-1.d0)
   wave_to_J=2*pi*clight*hbar
@@ -108,14 +106,14 @@ subroutine setup
   read(10,*) nquant
   read(10,*) n_dvr
   read(10,*) nb_vib
-  read(10,*) V_coup
   read(10,*) V_exothermicity
-  read(10,*) omg1
-  read(10,*) V_reorg1
-  read(10,*) omg2
+  read(10,*) Vc
+  read(10,*) omg_B
+  read(10,*) omg_0
+  read(10,*) lambda_B
   read(10,*) gamma_B
-  read(10,*) VER_rate
   read(10,*) temperature
+  read(10,*) rate_k 
   read(10,*) iforward
   read(10,*) icollapse
   read(10,*) ifriction
@@ -130,20 +128,23 @@ subroutine setup
   endif
   !---------------------------------------------------------- 
 
-  nbasis=2*nb_vib
   !nquant=nquant*nb_vib
-  !nbasis=nquant
+  nbasis=nquant
   ncl_site=nclass
 
   energy_cutoff=energy_cutoff*wave_to_J
   !temperature=temperature*wave_to_J/kb
-  omg1=omg1*(2*pi*clight)
-  omg2=omg2*(2*pi*clight)
-  gamma_B=gamma_B*(2*pi*clight)
+  kt=kb*temperature
+  Vc=Vc*wave_to_J
   V_exothermicity=V_exothermicity*wave_to_J
-  V_coup=V_coup*wave_to_J
-  V_reorg1=V_reorg1*wave_to_J
-  beta=1.d0/(kb*temperature)
+  omg_B=omg_B*2*pi*clight
+  omg_0=omg_0*2*pi*clight
+  gamma_B=gamma_B*2*pi*clight
+  !V_barrier=V_barrier*wave_to_J
+  !gamma_B=gamma_B*omg_B
+  lambda_B=lambda_B*wave_to_J
+  !gamma_B=omg_B**2/gamma_D
+  !V_reorg=4*lambda_D
 
 !write(6,*) omg_B/(2*pi*clight),gamma_B/(2*pi*clight)
 !stop
@@ -154,14 +155,14 @@ subroutine setup
   !-----------------------------------------------------------------  
   i=nsteps/nstep_avg+1
   allocate(pop(nquant,i),pop_surf(nquant,i),pop_amp(nquant,i))
-  allocate(rho(nbasis,nbasis,i))
+  allocate(rho(nquant,nquant,i))
   allocate(x(nclass),v(nclass),acc(nclass))
   allocate(x_old(nclass),v_old(nclass),acc_old(nclass),x_hop(nclass))
   allocate(mass(nclass),omg(nclass),ck(nclass))
   allocate(delr(nquant,nquant,nclass),delp(nquant,nquant,nclass),delacc(nquant,nquant,nclass))
   allocate(delr_old(nquant,nquant,nclass),delp_old(nquant,nquant,nclass))
   allocate(si_adiab(nbasis,nquant),ci(nquant),V_k(nquant),V_k_old(nquant),sigma(nquant,nquant))
-  allocate(Hamil_site(2,2),Hamil_diab(nbasis,nbasis),delH_dels(nbasis,nbasis,nclass),delH_dels_ad(nquant,nquant,nclass))
+  allocate(Hamil_site(nbasis,nbasis),Hamil_diab(nbasis,nbasis),delH_dels(nbasis,nbasis,nclass),delH_dels_ad(nquant,nquant,nclass))
   allocate(pot(nquant,nquant),force(nquant,nquant,nclass),force_old(nquant,nquant,nclass),delf(nquant,nquant,nclass))
   allocate(mat(nbasis,nbasis),mat_adiab(nquant,nquant))
   allocate(d_ij(nquant,nquant,nclass),vdotd(nquant,nquant),hop_prob(nquant),W_overlap(nquant,nquant))
@@ -193,7 +194,7 @@ subroutine setup
     if(ifolder>1) then
       do i=1,(ifolder-1)*N_traj
         seed=seed+1
-!        call init_cond
+        call init_cond
       enddo
       call random_seed(put=seed)
     endif
@@ -210,7 +211,6 @@ subroutine main
   implicit none
   integer i,j,k,n
   real*8 t1,t2
-  real*8 Vc_save
 
   call files(0)
 
@@ -218,18 +218,14 @@ subroutine main
 
   call setup_parameters
   call initialize_averages
+!call check_acceleration
 
-!call draw_pes
-
-  Vc_save=V_coup
+!call pes
 
   do i=1,N_traj
     traj_num=i
-    V_coup=1.d0*wave_to_J;call setup_parameters
     call init_cond
-    call evolve(1,10000)
-    V_coup=Vc_save;call setup_parameters
-    call evolve(10001,nsteps)
+    call evolve(nsteps)
     call average_end
   enddo
   call write_average
@@ -284,30 +280,34 @@ subroutine init_cond
   integer i
   real*8 sig_x,sig_p,rnd,ak,su
   real*8 energy_0
-  real*8 ci_diab(nbasis)
 
   do i=1,nclass
     !ak=2/(hbar*omg(i))*dtanh(beta*hbar*omg(i)/2.d0) !! Wigner
     ak=beta    !! Classical
-    sig_x=1.d0/dsqrt(ak*mass(i)*omg(i)**2)
+!    sig_x=1.d0/dsqrt(ak*mass(i)*omg(i)**2)
     sig_p=dsqrt(mass(i)/ak)
-    call gaussian_random_number(rnd)
-    x(i)=rnd*sig_x - g_coup1*g_coup2/(mass(1)*omg1*omg2)**2
+ !   call gaussian_random_number(rnd)
+  !  x(i)=rnd*sig_x-(g_coup/(mass(1)*omg_B**2))
     call gaussian_random_number(rnd)
     v(i)=(1.d0/mass(i)*(rnd*sig_p))
   enddo
+    
+    ak=beta    !! Classical
+    sig_x=1.d0/dsqrt(ak*mass(1)*omg_B**2)
+    call gaussian_random_number(rnd)
+    x(1)=rnd*sig_x-(g_coup/(mass(1)*omg_B**2))
+    
+    sig_x=1.d0/dsqrt(ak*mass(1)*omg_0**2)
+    call gaussian_random_number(rnd)
+    x(2)=rnd*sig_x+(x(1)*g_coup_dash/(mass(1)*omg_0**2))
 
   state=1
-  call evaluate_variables(0)
 
-  ci_diab=0.d0
-  do i=1,nbasis/2
-    ci_diab(i)=dsqrt(dexp(-beta*V_k(i)))
-  enddo
-  ci_diab=ci_diab/sqrt(sum(ci_diab*ci_diab))
+  call evaluate_variables(0)
+  call evaluate_variables(1)
 
   !! quantum state initialized on diabat 1
-  ci=matmul(transpose(si_adiab),ci_diab)
+  ci=si_adiab(state,:)
 
   call random_number(rnd)
   su=0.d0
@@ -339,9 +339,9 @@ subroutine init_cond
 end subroutine init_cond
 !-----------------------------------------------------------------  
 
-subroutine evolve(start,nsteps)
+subroutine evolve(nsteps)
   implicit none
-  integer,intent(in) :: start,nsteps
+  integer,intent(in) :: nsteps
   integer i,j,nstep_sm,iflag_coll,i_do_something
   real*8 t1,t2
   integer iterm
@@ -350,7 +350,7 @@ subroutine evolve(start,nsteps)
 
   call write_output(1,1)
   iterm=0
-  do i=start,nsteps
+  do i=1,nsteps
     call write_output(i,0)
     call average(i)
     call save_old_state
@@ -430,8 +430,8 @@ subroutine average(i)
   implicit none
   integer,intent(in) :: i
   integer j,i1,j1,k,kp
-  complex*16 ci_diab(nquant),rho_ad(nquant,nquant),tmp(nbasis,nbasis)
-  real*8 r_avg,U(nbasis,nquant),U_exc(nquant,nquant)
+  complex*16 ci_diab(nquant),rho_ad(nquant,nquant)
+  real*8 r_avg,U(nquant,nquant),U_exc(nquant,nquant)
   integer if_reactant
   real*8 t1,t2
 
@@ -467,7 +467,11 @@ subroutine average(i)
     enddo
     rho(:,:,j)=rho(:,:,j)+matmul(U,matmul(rho_ad,transpose(U)))
 
-
+!if (x(1)>0) then
+!rho(2,2,j)=rho(2,2,j)+1
+!else 
+!rho(1,1,j)=rho(1,1,j)+1
+!endif
     !pop(:,j)=pop(:,j)+si_adiab(:,state)**2
     !pop_surf(:,j)=pop_surf(:,j)+si_adiab(:,state)**2
     !ci_diab=matmul(si_adiab,ci)
@@ -542,7 +546,7 @@ subroutine evolve_quantum_small_dtq
   endif
 
   dtq1=0.02/maxval(vdotd)
-  dtq2=0.1*hbar/maxval(V_k-sum(V_k)/real(nquant))
+  dtq2=0.02*hbar/maxval(V_k-sum(V_k)/real(nquant))
   dtq=dtq1
   if(dtq>dtq2)dtq=dtq2
 
@@ -555,16 +559,14 @@ subroutine evolve_quantum_small_dtq
   V_k=V_k_old
   call compute_mat_adiab
 
-!write(6,*) curr_time*1.d15,dtq1*1.d15,dtq2*1.d15
-
   flag_hop=0
   do i=1,nstep_qm
     call compute_hop_prob(dtq)
     if(flag_hop==0)call check_hop(i*dtq)
     call rk4(ci,dtq,dVk_dt)
-if(icollapse==1)call rk4_decoherence(dtq)
+    if(icollapse==1)call rk4_decoherence(dtq)
   enddo
-!  if(icollapse==1)call vv_decoherence(dtc)
+  !if(icollapse==1)call vv_decoherence(dtc)
 
   !if(icollapse==1) then
   !  call verlet_decoherence(dtc,W_overlap,V_k_old,dvk_dt)
@@ -839,28 +841,37 @@ subroutine evolve_classical(dt)
 
   !call cpu_time(t1)
 
-  if(ifriction==0) then
+ ! if(ifriction==0) then
     !! Step 1
-    x=x+v*dt+0.5*acc*dt*dt
-    v=v+0.5*acc*dt
-    acc_old=acc
-    call evaluate_variables(0)
-    v=v+0.5*dt*acc
-    call evaluate_variables(1)
-  endif
-
-  if(ifriction==1) then
+    x(1)=x(1)+v(1)*dt+0.5*acc(1)*dt*dt
+    v(1)=v(1)+0.5*acc(1)*dt
+    
     gama_dt=gamma_B*dt
     c0=dexp(-gama_dt)
     c1=1.d0/gama_dt*(1.d0-c0)
     c2=1.d0/gama_dt*(1.d0-c1)
      call stochastic_force(delta_r,delta_v,dt)
-     x=x+c1*dt*v+c2*dt*dt*acc+delta_r
+     x(2)=x(2)+c1*dt*v(2)+c2*dt*dt*acc(2)+delta_r(2)
+    
      acc_old=acc
-     call evaluate_variables(0)
-     v=c0*v+(c1-c2)*dt*acc_old+c2*dt*acc+delta_v
-     call evaluate_variables(1)
-  endif
+    call evaluate_variables(0)
+    v(1)=v(1)+0.5*dt*acc(1)
+    v(2)=c0*v(2)+(c1-c2)*dt*acc_old(2)+c2*dt*acc(2)+delta_v(2)
+    call evaluate_variables(1)
+  !endif
+
+  !if(ifriction==1) then
+   ! gama_dt=gamma_B*dt
+   ! c0=dexp(-gama_dt)
+   ! c1=1.d0/gama_dt*(1.d0-c0)
+   ! c2=1.d0/gama_dt*(1.d0-c1)
+   !  call stochastic_force(delta_r,delta_v,dt)
+   !  x=x+c1*dt*v+c2*dt*dt*acc+delta_r
+   !  acc_old=acc
+   !  call evaluate_variables(0)
+   !  v=c0*v+(c1-c2)*dt*acc_old+c2*dt*acc+delta_v
+   !  call evaluate_variables(1)
+  !endif
 
   !call cpu_time(t2);tim_ev_cl=tim_ev_cl+t2-t1
 
@@ -975,6 +986,7 @@ subroutine velocity_adjust(state_tentative,ifrust)
       if(vd*f2<0.d0) then
         gama=bb/aa
       endif
+      !endif
     endif
     if(flag_frust>0)gama=0.d0
   else
@@ -1124,10 +1136,9 @@ subroutine write_output(n,nflag)
     if(iwrite==1) then
       if(mod(n,nstep_write)==1.or.nstep_write==1) then
         write(10,'(4es17.7,i5)')curr_time*1.d15,energy/wave_to_J,sum(cdabs(ci)**2),temperature,state
-        write(6,'(4es17.7,i5)')curr_time*1.d15,energy/wave_to_J,sum(cdabs(ci)**2),temperature,state
         write(11,'(es15.5$)')curr_time*1.d15
-        write(12,'(21f12.3)')curr_time*1.d15,cdabs(ci)**2!,datan2(dimag(ci(1:2)),real(ci(1:2)))*180/pi
-        !write(13,'(5es15.5)')curr_time*1.d15,vdotd(1,2),dasin(W_overlap(1,2))/dtc,hop_prob_net(3-state),state*1.d0
+        write(12,'(5f15.5)')curr_time*1.d15,cdabs(ci(1:2))**2,datan2(dimag(ci(1:2)),real(ci(1:2)))*180/pi
+        write(13,'(5es15.5)')curr_time*1.d15,vdotd(1,2),dasin(W_overlap(1,2))/dtc,hop_prob_net(3-state),state*1.d0
         write(14,'(6f15.5)')curr_time*1.d15,W_overlap(1,1:2),W_overlap(2,1:2),determinant(W_overlap,nquant)
         write(15,'(6es15.5)')curr_time*1.d15,delr(1,1,1)*1.d10,delr(2,2,1)*1.d10
         do i=1,nclass
@@ -1183,23 +1194,20 @@ subroutine write_average
   pop_surf=pop_surf/nf
   pop_amp=pop_amp/nf
 
-write(6,*) nb_vib
-
   do i=1,nsteps/nstep_avg
     pop_el=0.d0
-    write(102,'(f15.7$)')(i-1)*nstep_avg*dtc*1.d15
-    do i1=1,2
-      j=(i1-1)*nb_vib
-      do k=1,nb_vib
-        pop_el(i1)=pop_el(i1)+(rho(j+k,j+k,i))
-        write(102,'(f15.7$)')real(rho(j+k,j+k,i))
-      enddo
-    enddo
-    write(102,*)
-    write(100,'(21f15.7)')(i-1)*nstep_avg*dtc*1.d15,pop_el
+   ! do i1=1,2
+   !   j=(i1-1)*nb_vib
+   !   do k=1,nb_vib
+   !     pop_el(i1)=pop_el(i1)+(rho(j+k,j+k,i))
+   !   enddo
+   !   write(100,'(21f15.7)')(i-1)*nstep_avg*dtc*1.d15,pop_el
+   ! enddo
+   
+write(100,'(21f15.7)')(i-1)*nstep_avg*dtc*1.d15,rho(1,1,i),rho(2,2,i)
   enddo
 
-  write(101,*) cnt_frust,cnt_collapse
+  write(101,*) Vc/wave_to_J,cnt_frust,cnt_collapse
 
 end subroutine write_average
 !-----------------------------------------------------------------  
@@ -1247,13 +1255,13 @@ subroutine tise
   integer i,j,k
   real*8 Hamil(nbasis,nbasis),ens(nbasis),vect(nbasis,nquant)
   real*8 pot_cl,acc_cl(nclass),acc_qm(nclass),dpotcl_dx(nclass)
+  real*8 si_adiab_old(nquant,nbasis)
   real*8 t1,t2
 
   !call cpu_time(t1)
 
   call compute_potential(Hamil,delH_dels)
   Hamil_diab=Hamil
-  ens=0.d0
   call diag(Hamil,nbasis,ens,vect,nquant)
 
   do i=1,nquant
@@ -1294,7 +1302,7 @@ subroutine compute_delH_dels_ad
       enddo
       force(k,kp,:)=-delH_dels_ad(k,kp,:)
       force(kp,k,:)=-delH_dels_ad(k,kp,:)
-      delH_dels_ad(kp,k,:)=delH_dels_ad(k,kp,:)
+      delH_dels_ad(kp,k,i)=delH_dels_ad(k,kp,i)
     enddo
     pot(k,k)=V_k(k)
   enddo
@@ -1421,37 +1429,32 @@ end subroutine orthoganalize
 subroutine setup_parameters
   implicit none
   integer i
+  real*8 si_diab(nbasis,2),Vb
   real*8 c_0,c_e
-  real*8 omg_max,delw,w
+  real*8 omg_max,delw
 
   mass=1836.d0*au2kg
-!  omg_max=3*omg_B
-!  omg_c=2*omg_B
-!  delw=omg_max/real(nclass)
-  w=omg1
+  omg_max=3*omg_B
+  omg_c=2*omg_B
+  delw=omg_max/real(nclass)
 
-  g_coup1=dsqrt(V_reorg1*mass(1)*omg1**2/2.d0)
-  !V_reorg2=VER_rate*(1-dexp(-beta*hbar*omg1)) * mass(1)*omg1
-  V_reorg2=VER_rate*mass(1)*omg1
-  V_reorg2=V_reorg2 * 2 * ((w*w-omg2*omg2)**2+(gamma_B*w)**2)/(omg2**2*gamma_B*w)
+  g_coup=dsqrt(lambda_B*mass(1)*omg_B**2/2.d0)
+  !g_coup_dash=mass(1)*dsqrt(omg_B**5/omg_0)
+  lambda_dash=rate_k*2.d0*mass(1)*((omg_B**2-omg_0**2)**2+(gamma_B**2*omg_B**2))/(gamma_B*omg_0**2)
+  g_coup_dash=dsqrt(lambda_dash*mass(1)*omg_0**2/2.d0)
 
-  g_coup2=dsqrt(V_reorg2*mass(1)*omg2**2/2.d0)
-
+!write(*,*) g_coup,g_coup_dash
+!stop
 
   Hamil_site=0.d0
-  Hamil_site(2,2)=-V_exothermicity
+  Hamil_site(1,1)=900.d0
+  Hamil_site(2,2)=0.d0
 
-  Hamil_site(1,2)=V_coup; Hamil_site(2,1)=V_coup
+  Hamil_site(1,2)=150d0; Hamil_site(2,1)=Hamil_site(1,2)
 
-!  Hamil_site=Hamil_site*wave_to_J
+  Hamil_site=Hamil_site*wave_to_J
 
-  omg=omg2
-  ck=g_coup2
-
- omg_scaled=omg1!dsqrt(omg_b**2+sum(ck(1:ncl_site)**2/(mass(1)**2*omg(1:ncl_site)**2)))
-
-  call setup_quantized_vib
-  call setup_H0
+ ! omg=omg_B
 
 end subroutine setup_parameters
 !-----------------------------------------------------------------  
@@ -1463,7 +1466,7 @@ subroutine setup_quantized_vib
   real*8 ens(n_dvr),vect(n_dvr,n_dvr)
 
   do i=1,n_dvr
-    x_dvr(i)=-5.d-10+10.d-10*(i-1)/real(n_dvr-1)
+    x_dvr(i)=-1.d-10+2.d-10*(i-1)/real(n_dvr-1)
   enddo
   delq=x_dvr(2)-x_dvr(1)
 
@@ -1483,7 +1486,7 @@ subroutine setup_quantized_vib
   H_dvr=KE_dvr
   do i=1,n_dvr
     q=x_dvr(i)
-    H_dvr(i,i)=H_dvr(i,i)+0.5*mass(1)*omg_scaled**2*q**2+g_coup1*q
+    H_dvr(i,i)=H_dvr(i,i)+0.5*mass(1)*omg_scaled**2*q**2+g_coup*q
   enddo
   call diag(H_dvr,n_dvr,ens,vect,n_dvr)
   si_sho(:,:,1)=vect(:,1:nb_vib)
@@ -1493,7 +1496,7 @@ subroutine setup_quantized_vib
   H_dvr=KE_dvr
   do i=1,n_dvr
     q=x_dvr(i)
-    H_dvr(i,i)=H_dvr(i,i)+0.5*mass(1)*omg_scaled**2*q**2-g_coup1*q
+    H_dvr(i,i)=H_dvr(i,i)+0.5*mass(1)*omg_scaled**2*q**2-g_coup*q
   enddo
   call diag(H_dvr,n_dvr,ens,vect,n_dvr)
   si_sho(:,:,2)=vect(:,1:nb_vib)
@@ -1556,21 +1559,13 @@ subroutine setup_H0
     enddo
   enddo
 
-  tmp=g_coup2**2/(2*mass(1)*omg2**2) ! sum(ck**2/(2*mass(1)*omg**2))
+  tmp=sum(ck**2/(2*mass(1)*omg**2))
 
-  do k1=1,2
-    l=(k1-1)*nb_vib+1
-    m=(k1)*nb_vib
-    Hamil_diab_0(l:m,l:m)=Hamil_diab_0(l:m,l:m)+qsq_exp(:,:,k1)*tmp
-  enddo
-
-!  do i=1,nquant
-!    do j=1,nquant
-!write(6,'(f12.3$)') Hamil_diab_0(i,j)/wave_to_J
-!    enddo
-!write(6,*) 
-!  enddo
-!  stop
+  !do k1=1,3
+  !  l=(k1-1)*nb_vib+1
+  !  m=(k1)*nb_vib
+  !  Hamil_diab_0(l:m,l:m)=Hamil_diab_0(l:m,l:m)+qsq_exp(:,:,k1)*tmp
+  !enddo
 
 end subroutine setup_H0
 !-----------------------------------------------------------------  
@@ -1579,37 +1574,36 @@ function spectral(w)
   implicit none
   real*8 spectral,w
 
-  !spectral=lambda_B/2.d0*gamma_B*w*omg_B**2/((w**2-omg_B**2)**2+gamma_B**2*w**2)
-  spectral=0.d0
+  spectral=lambda_B/2.d0*gamma_B*w*omg_B**2/((w**2-omg_B**2)**2+gamma_B**2*w**2)
 
 end function spectral
 !-----------------------------------------------------------------  
 
 subroutine compute_potential(H_diab,delV_dels)
   implicit none
-  real*8,intent(out) :: H_diab(nbasis,nbasis),delV_dels(nbasis,nbasis,nclass)
+  real*8,intent(out) :: H_diab(nquant,nquant),delV_dels(nquant,nquant,nclass)
   integer i,j,k1
   real*8 h1,dh1(ncl_site)
 
-  h1=g_coup2*x(1)
-  dh1=g_coup2
-
-  H_diab=Hamil_diab_0
+  H_diab=Hamil_site
   delv_dels=0.d0
 
-  i=nb_vib
-  H_diab(1:i,1:i)=H_diab(1:i,1:i)-h1*q_exp(:,:,1)
-  j=nb_vib+1
-  i=2*nb_vib
-  H_diab(j:i,j:i)=H_diab(j:i,j:i)-h1*q_exp(:,:,2)
+!x(2)=(g_coup_dash*x(1))/(mass(1)*omg_0**2)
+!x(2)=0d0
 
-  do k1=1,ncl_site
-    i=nb_vib
-    delv_dels(1:i,1:i,k1)=delv_dels(1:i,1:i,k1)-ck(k1)*q_exp(:,:,1)
-    j=nb_vib+1
-    i=2*nb_vib
-    delv_dels(j:i,j:i,k1)=delv_dels(j:i,j:i,k1)-ck(k1)*q_exp(:,:,2)
+  H1=(0.5*mass(1)*omg_B**2*x(1)**2)+(0.5d0*mass(1)*omg_0**2)*((x(2)-(g_coup_dash*x(1))/(mass(1)*omg_0**2))**2)
+  dH1(1)=mass(1)*omg_B**2*x(1)+g_coup_dash**2*x(1)/(mass(1)*omg_0**2)-x(2)*g_coup_dash
+  dH1(2)=mass(1)*omg_0**2*x(2)-x(1)*g_coup_dash
+
+    H_diab(1,1)=H_diaB(1,1)+H1+g_coup*x(1)
+    H_diab(2,2)=H_diaB(2,2)+H1-g_coup*x(1)
+
+ 
+  do i=1,nquant
+    delv_dels(i,i,:)=dH1(:)
   enddo
+    delv_dels(1,1,1)=delv_dels(1,1,1)+g_coup
+    delv_dels(2,2,1)=delv_dels(2,2,1)-g_coup
 
 end subroutine compute_potential
 !-----------------------------------------------------------------  
@@ -1620,8 +1614,8 @@ subroutine potential_classical(pot_cl,acc_cl)
   integer i
   real*8 q1,q3
 
-  pot_cl=0.5*mass(1)*sum(omg**2*x**2)
-  acc_cl=mass(1)*(omg**2*x)
+  pot_cl=0.d0
+  acc_cl=0.d0
 
 end subroutine potential_classical
 !-----------------------------------------------------------------  
@@ -1635,7 +1629,7 @@ subroutine check_acceleration
   real*8 q0,rnd
 
   delx=1.d-17
-  state=2
+  state=1
 
   do i=1,nclass
     call random_number(rnd)
@@ -1797,7 +1791,7 @@ subroutine diag(mat,n,eigen_value,eigen_vect,m_values)
 
   call dsyevr('V','I','U',n,mat,n,vl,vu,il,iu,abstol,m,eigen_value,eigen_vect,n,isuppz,work,lwork,iwork,liwork,info)
   if(info.ne.0) then
-    write(6,*) "problem in diagonalization",info
+    write(6,*) "problem in diagonalization ",info
     stop
   endif
 
@@ -1892,7 +1886,7 @@ subroutine schur(mat,T,n,eigen_value,eigen_vect,nold,cwork)
   lwork=size(cwork)
   call zgees('V','N',SELECT,N,T,n,SDIM,eigen_value,eigen_vect,n,cWORK,LWORK,rwork,BWORK,INFO)
   if(info.ne.0) then
-    write(6,*) "problem in diagonalization",info
+    write(6,*) "problem in diagonalization qq",info
     stop
   endif
 
@@ -1988,19 +1982,16 @@ subroutine compute_KE_matrix_dvr(KE_matrix,ngrid,delq,mass)
   enddo
 end subroutine compute_KE_matrix_dvr
 !---------------------------------------------------------- 
+subroutine pes
+implicit none
+integer i
+do i=1,1000
+x(1)=-0.2d-10+(i-1)*0.4d-13
+call evaluate_variables(0)
+write(30,*) x(1),v_k/wave_to_j
+enddo
+stop
 
-subroutine draw_pes
-  implicit none
-  integer i
 
-  do i=1,1000
-    x(1)=-10.d-10+20.d-10*i/999.d0
-    call evaluate_variables(0)
-    write(20,'(7f12.3)') x(1)*1.d10,V_k(1:6)/wave_to_J
-  enddo
-  stop
-
-end subroutine draw_pes
-!-----------------------------------------------------------------  
-
+end subroutine
 End Module mod_afssh
